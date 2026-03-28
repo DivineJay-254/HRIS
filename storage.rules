@@ -1,0 +1,47 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // -------------------------------------------------------------------------
+    // /Documents/{employerId}/{employeeId}/{yearMonth}/{filename} path
+    // -------------------------------------------------------------------------
+    match /Documents/{employerId}/{employeeId}/{yearMonth}/{filename} {
+
+      // Prevents cross-employer file access. Even if an attacker knows the
+      // exact storage path of another employer's document (e.g. from a leaked
+      // URL), they cannot read it unless their Firebase UID matches the
+      // {employerId} segment in the path. This makes storage paths non-guessable
+      // in practice AND enforces it at the rule layer — defence in depth.
+      allow read: if request.auth != null
+                  && request.auth.uid == employerId;
+
+      // Prevents a client from uploading files under another employer's path.
+      // An attacker cannot inject malicious files into another employer's
+      // storage namespace even if they know the correct path structure.
+      // The file type check prevents uploading executable files disguised as PDFs
+      // that could be served to employees.
+      // The size check prevents storage abuse via oversized uploads.
+      allow write: if request.auth != null
+                   && request.auth.uid == employerId
+                   && request.resource.contentType == 'application/pdf'
+                   && request.resource.size <= 10 * 1024 * 1024;
+
+      // No delete allowed from the client. Document deletion must go through a
+      // Cloud Function that also removes the Firestore metadata record atomically.
+      // This prevents orphaned Storage files (no metadata) or orphaned metadata
+      // records (no file), both of which corrupt the audit trail.
+      allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Catch-all: deny all other paths.
+    // Prevents access to any storage path not explicitly covered above.
+    // Fail-closed — a misconfigured upload path fails safe rather than
+    // falling through to an open rule.
+    // -------------------------------------------------------------------------
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

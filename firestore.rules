@@ -1,0 +1,143 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -------------------------------------------------------------------------
+    // Helper functions
+    // -------------------------------------------------------------------------
+
+    // Checks that the caller is authenticated at all.
+    // Prevents: unauthenticated scrapers from reading any document, ever.
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Checks that the caller holds the 'admin' Custom Claim on their JWT.
+    // The claim is set by the Firebase Admin SDK in a Cloud Function — it cannot
+    // be self-assigned by a client. This prevents an employer from granting
+    // themselves admin access by writing to a Firestore field.
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.role == 'admin';
+    }
+
+    // Checks that the caller is the employer who owns this document.
+    // Uses resource.data (the existing document on reads/updates) so an attacker
+    // cannot pass a spoofed employerId in request.resource.data to gain access.
+    function isOwningEmployer() {
+      return isAuthenticated() && request.auth.uid == resource.data.employerId;
+    }
+
+    // Checks that the caller is setting employerId to their own UID on create.
+    // Prevents an employer from creating a document claiming to belong to
+    // another employer's UID, which would let them inject records into that
+    // employer's dataset.
+    function isCreatingOwnRecord() {
+      return isAuthenticated() && request.auth.uid == request.resource.data.employerId;
+    }
+
+    // Confirms that createdAt is not being changed on an update.
+    // Prevents tampering with the audit trail — an attacker who gains write
+    // access cannot backdate a record or erase its creation timestamp.
+    function createdAtIsUnchanged() {
+      return request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    // Confirms that no permission-related fields are being changed by the client.
+    // Prevents an employer from escalating their own role or reassigning a
+    // document to a different employer by modifying the employerId field.
+    function noPermissionFieldsChanged() {
+      return !('role' in request.resource.data.diff(resource.data).affectedKeys())
+          && !('employerId' in request.resource.data.diff(resource.data).affectedKeys());
+    }
+
+    // -------------------------------------------------------------------------
+    // /employees collection
+    // -------------------------------------------------------------------------
+    match /employees/{employeeId} {
+
+      // Prevents an employer from reading another employer's employee list by
+      // guessing or enumerating document IDs. The check is on the document's
+      // employerId field, not the URL path, so path manipulation cannot bypass it.
+      allow read: if isAdmin() || isOwningEmployer()
+                  || (isAuthenticated() && request.auth.uid == resource.data.linkedUserId);
+
+      // Prevents a client from creating an employee record that claims to belong
+      // to a different employer. Also prevents unauthenticated record injection.
+      allow create: if isCreatingOwnRecord()
+                    && request.resource.data.createdAt == request.time;
+
+      // Prevents an attacker with a valid employer session from modifying the
+      // employerId field to steal records or modify another employer's data.
+      // Also prevents backdating by blocking createdAt changes.
+      allow update: if isOwningEmployer()
+                    && createdAtIsUnchanged()
+                    && noPermissionFieldsChanged();
+
+      // Prevents an employer from deleting another employer's employee records.
+      allow delete: if isAdmin() || isOwningEmployer();
+    }
+
+    // -------------------------------------------------------------------------
+    // /documents collection
+    // -------------------------------------------------------------------------
+    match /documents/{documentId} {
+
+      // Prevents cross-employer document access. An employer cannot read
+      // document metadata (file names, storage paths) belonging to another
+      // employer even if they guess the document ID.
+      allow read: if isAdmin()
+                  || isOwningEmployer()
+                  || (isAuthenticated() && request.auth.uid == resource.data.uploadedBy);
+
+      // Prevents a client from writing a document metadata record that
+      // encodes a different employer's UID, which would allow them to trigger
+      // the Cloud Function notification for another employer's employee.
+      // Also enforces that uploadedAt is server-set, not client-provided.
+      allow create: if isCreatingOwnRecord()
+                    && request.resource.data.uploadedAt == request.time
+                    && request.resource.data.createdAt == request.time;
+
+      // Prevents a client from modifying the storage path or employee reference
+      // after upload, which could be used to swap a document's association to
+      // a different employee or point to a file the employer does not own.
+      allow update: if isOwningEmployer()
+                    && createdAtIsUnchanged()
+                    && !('storagePath' in request.resource.data.diff(resource.data).affectedKeys())
+                    && !('employeeId' in request.resource.data.diff(resource.data).affectedKeys());
+
+      // Prevents an employer from deleting document audit records belonging to
+      // another employer's employees.
+      allow delete: if isAdmin() || isOwningEmployer();
+    }
+
+    // -------------------------------------------------------------------------
+    // /auditLog collection (write-only for clients, admin-read only)
+    // -------------------------------------------------------------------------
+    match /auditLog/{logId} {
+
+      // Prevents audit log tampering — no client can read the audit trail,
+      // which would reveal access patterns and let an attacker know if they
+      // are being monitored.
+      allow read: if isAdmin();
+
+      // Allows clients to append audit entries but not modify or delete them.
+      // This is a write-only log — clients can record events but cannot erase
+      // their own history.
+      allow create: if isAuthenticated();
+
+      // Prevents any client (including the record's creator) from modifying
+      // or deleting audit entries, preserving the integrity of the trail.
+      allow update, delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Catch-all: deny everything not explicitly matched above.
+    // Prevents access to any collection created in the future before rules
+    // are written for it. Fail-closed by default.
+    // -------------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

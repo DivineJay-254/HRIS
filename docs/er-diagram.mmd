@@ -1,0 +1,48 @@
+erDiagram
+  EMPLOYER_AUTH_USER {
+    string uid PK "Firebase Auth UID — the identity anchor"
+    string email
+    string role "Custom Claim on JWT: employer or admin"
+  }
+
+  EMPLOYEES {
+    string employeeId PK "Auto-generated Firestore ID"
+    string employerId FK "= owning employer Firebase UID"
+    string linkedUserId FK "nullable — set when employee gets own login"
+    string fullName
+    string nationalId "PII — should be encrypted at rest"
+    string jobTitle
+    string department
+    timestamp startDate
+    string status "active | inactive"
+    timestamp createdAt "server-set via serverTimestamp(), immutable"
+    timestamp updatedAt "server-set on every write"
+  }
+
+  DOCUMENTS {
+    string documentId PK "Auto-generated Firestore ID"
+    string employeeId FK "→ employees collection"
+    string employerId FK "= owning employer UID, used in Security Rules"
+    string fileName "original filename from client"
+    string storagePath "full GCS object path"
+    string uploadedBy FK "Firebase Auth UID of uploader"
+    timestamp uploadedAt "server-set via serverTimestamp()"
+    timestamp createdAt "server-set via serverTimestamp(), immutable"
+    number fileSize "bytes"
+    string emailStatus "pending | sent | failed | config_error"
+  }
+
+  AUDIT_LOG {
+    string logId PK "Auto-generated"
+    string actorUid "Firebase Auth UID of the actor"
+    string action "e.g. employee.create, document.upload"
+    string targetId "ID of the affected document"
+    timestamp createdAt "server-set"
+    string metadata "JSON string of relevant context"
+  }
+
+  EMPLOYER_AUTH_USER ||--o{ EMPLOYEES : "owns via employerId"
+  EMPLOYER_AUTH_USER ||--o{ DOCUMENTS : "uploaded via uploadedBy"
+  EMPLOYER_AUTH_USER ||--o{ DOCUMENTS : "owns via employerId"
+  EMPLOYEES ||--o{ DOCUMENTS : "has documents via employeeId"
+  EMPLOYER_AUTH_USER ||--o{ AUDIT_LOG : "actor via actorUid"
